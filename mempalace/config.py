@@ -58,7 +58,11 @@ def sanitize_content(value: str, max_length: int = 100_000) -> str:
     return value
 
 
-DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
+def get_default_config_dir() -> Path:
+    """Get the default configuration directory (~/.mempalace)."""
+    return Path(os.path.expanduser("~/.mempalace"))
+
+
 DEFAULT_COLLECTION_NAME = "mempalace_drawers"
 
 DEFAULT_TOPIC_WINGS = [
@@ -126,7 +130,7 @@ class MempalaceConfig:
                         Defaults to ~/.mempalace.
         """
         self._config_dir = (
-            Path(config_dir) if config_dir else Path(os.path.expanduser("~/.mempalace"))
+            Path(config_dir) if config_dir else get_default_config_dir()
         )
         self._config_file = self._config_dir / "config.json"
         self._people_map_file = self._config_dir / "people_map.json"
@@ -140,12 +144,42 @@ class MempalaceConfig:
                 self._file_config = {}
 
     @property
+    def config_dir(self) -> Path:
+        """The configuration directory."""
+        return self._config_dir
+
+    @property
     def palace_path(self):
         """Path to the memory palace data directory."""
         env_val = os.environ.get("MEMPALACE_PALACE_PATH") or os.environ.get("MEMPAL_PALACE_PATH")
         if env_val:
             return env_val
-        return self._file_config.get("palace_path", DEFAULT_PALACE_PATH)
+        
+        # If explicitly in config file, use that
+        if "palace_path" in self._file_config:
+            return self._file_config["palace_path"]
+            
+        # Default: subdirectory 'palace' within config_dir
+        return str(self._config_dir / "palace")
+
+    @property
+    def kg_path(self):
+        """Path to the knowledge graph SQLite database."""
+        env_val = os.environ.get("MEMPALACE_KG_PATH")
+        if env_val:
+            return env_val
+        
+        # If explicitly in config file, use that
+        if "kg_path" in self._file_config:
+            return self._file_config["kg_path"]
+            
+        # Default: knowledge_graph.sqlite3 within config_dir
+        return str(self._config_dir / "knowledge_graph.sqlite3")
+
+    @property
+    def wal_dir(self) -> Path:
+        """The write-ahead log directory."""
+        return self._config_dir / "wal"
 
     @property
     def collection_name(self):
@@ -204,7 +238,8 @@ class MempalaceConfig:
             pass  # Windows doesn't support Unix permissions
         if not self._config_file.exists():
             default_config = {
-                "palace_path": DEFAULT_PALACE_PATH,
+                "palace_path": str(self._config_dir / "palace"),
+                "kg_path": str(self._config_dir / "knowledge_graph.sqlite3"),
                 "collection_name": DEFAULT_COLLECTION_NAME,
                 "topic_wings": DEFAULT_TOPIC_WINGS,
                 "hall_keywords": DEFAULT_HALL_KEYWORDS,

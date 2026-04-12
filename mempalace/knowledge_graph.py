@@ -10,29 +10,6 @@ Real knowledge graph with:
 
 Storage: SQLite (local, no dependencies, no subscriptions)
 Query: entity-first traversal with time filtering
-
-This is what competes with Zep's temporal knowledge graph.
-Zep uses Neo4j in the cloud ($25/mo+). We use SQLite locally (free).
-
-Usage:
-    from mempalace.knowledge_graph import KnowledgeGraph
-
-    kg = KnowledgeGraph()
-    kg.add_triple("Max", "child_of", "Alice", valid_from="2015-04-01")
-    kg.add_triple("Max", "does", "swimming", valid_from="2025-01-01")
-    kg.add_triple("Max", "loves", "chess", valid_from="2025-10-01")
-
-    # Query: everything about Max
-    kg.query_entity("Max")
-
-    # Query: what was true about Max in January 2026?
-    kg.query_entity("Max", as_of="2026-01-15")
-
-    # Query: who is connected to Alice?
-    kg.query_entity("Alice", direction="both")
-
-    # Invalidate: Max's sports injury resolved
-    kg.invalidate("Max", "has_issue", "sports_injury", ended="2026-02-15")
 """
 
 import hashlib
@@ -44,12 +21,10 @@ from datetime import date, datetime
 from pathlib import Path
 
 
-DEFAULT_KG_PATH = os.path.expanduser("~/.mempalace/knowledge_graph.sqlite3")
-
-
 class KnowledgeGraph:
-    def __init__(self, db_path: str = None):
-        self.db_path = db_path or DEFAULT_KG_PATH
+    def __init__(self, db_path: str):
+        """Initialize the knowledge graph with a specific SQLite path."""
+        self.db_path = db_path
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._connection = None
         self._lock = threading.Lock()
@@ -132,19 +107,11 @@ class KnowledgeGraph:
         source_closet: str = None,
         source_file: str = None,
     ):
-        """
-        Add a relationship triple: subject → predicate → object.
-
-        Examples:
-            add_triple("Max", "child_of", "Alice", valid_from="2015-04-01")
-            add_triple("Max", "does", "swimming", valid_from="2025-01-01")
-            add_triple("Alice", "worried_about", "Max injury", valid_from="2026-01", valid_to="2026-02")
-        """
+        """Add a relationship triple: subject → predicate → object."""
         sub_id = self._entity_id(subject)
         obj_id = self._entity_id(obj)
         pred = predicate.lower().replace(" ", "_")
 
-        # Auto-create entities if they don't exist
         with self._lock:
             conn = self._conn()
             with conn:
@@ -155,14 +122,13 @@ class KnowledgeGraph:
                     "INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)", (obj_id, obj)
                 )
 
-                # Check for existing identical triple
                 existing = conn.execute(
                     "SELECT id FROM triples WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL",
                     (sub_id, pred, obj_id),
                 ).fetchone()
 
                 if existing:
-                    return existing["id"]  # Already exists and still valid
+                    return existing["id"]
 
                 triple_id = f"t_{sub_id}_{pred}_{obj_id}_{hashlib.sha256(f'{valid_from}{datetime.now().isoformat()}'.encode()).hexdigest()[:12]}"
 
@@ -201,14 +167,8 @@ class KnowledgeGraph:
     # ── Query operations ──────────────────────────────────────────────────
 
     def query_entity(self, name: str, as_of: str = None, direction: str = "outgoing"):
-        """
-        Get all relationships for an entity.
-
-        direction: "outgoing" (entity → ?), "incoming" (? → entity), "both"
-        as_of: date string — only return facts valid at that time
-        """
+        """Get all relationships for an entity."""
         eid = self._entity_id(name)
-
         results = []
         with self._lock:
             conn = self._conn()
@@ -254,7 +214,6 @@ class KnowledgeGraph:
                             "current": row["valid_to"] is None,
                         }
                     )
-
         return results
 
     def query_relationship(self, predicate: str, as_of: str = None):
@@ -326,8 +285,6 @@ class KnowledgeGraph:
             for r in rows
         ]
 
-    # ── Stats ─────────────────────────────────────────────────────────────
-
     def stats(self):
         conn = self._conn()
         entities = conn.execute("SELECT COUNT(*) as cnt FROM entities").fetchone()["cnt"]
@@ -349,53 +306,3 @@ class KnowledgeGraph:
             "expired_facts": expired,
             "relationship_types": predicates,
         }
-
-    # ── Seed from known facts ─────────────────────────────────────────────
-
-    def seed_from_entity_facts(self, entity_facts: dict):
-        """
-        Seed the knowledge graph from fact_checker.py ENTITY_FACTS.
-        This bootstraps the graph with known ground truth.
-        """
-        for key, facts in entity_facts.items():
-            name = facts.get("full_name", key.capitalize())
-            etype = facts.get("type", "person")
-            self.add_entity(
-                name,
-                etype,
-                {
-                    "gender": facts.get("gender", ""),
-                    "birthday": facts.get("birthday", ""),
-                },
-            )
-
-            # Relationships
-            parent = facts.get("parent")
-            if parent:
-                self.add_triple(
-                    name, "child_of", parent.capitalize(), valid_from=facts.get("birthday")
-                )
-
-            partner = facts.get("partner")
-            if partner:
-                self.add_triple(name, "married_to", partner.capitalize())
-
-            relationship = facts.get("relationship", "")
-            if relationship == "daughter":
-                self.add_triple(
-                    name,
-                    "is_child_of",
-                    facts.get("parent", "").capitalize() or name,
-                    valid_from=facts.get("birthday"),
-                )
-            elif relationship == "husband":
-                self.add_triple(name, "is_partner_of", facts.get("partner", name).capitalize())
-            elif relationship == "brother":
-                self.add_triple(name, "is_sibling_of", facts.get("sibling", name).capitalize())
-            elif relationship == "dog":
-                self.add_triple(name, "is_pet_of", facts.get("owner", name).capitalize())
-                self.add_entity(name, "animal")
-
-            # Interests
-            for interest in facts.get("interests", []):
-                self.add_triple(name, "loves", interest.capitalize(), valid_from="2025-01-01")
