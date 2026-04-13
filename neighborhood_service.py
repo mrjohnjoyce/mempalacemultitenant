@@ -4,9 +4,10 @@ import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Depends
 from pydantic import BaseModel
 import chromadb
+import secrets
 
 # Import core MemPalace components from the current package
 from mempalace.config import MempalaceConfig
@@ -18,6 +19,65 @@ app = FastAPI(title="MemPalace Neighborhood Service")
 # 1. THE ROOT STORAGE (Override via env if needed)
 NEIGHBORHOOD_ROOT = Path(os.environ.get("MEMPALACE_NEIGHBORHOOD_ROOT", "/Users/johnjoyce/mempalace_neighborhoods"))
 NEIGHBORHOOD_ROOT.mkdir(parents=True, exist_ok=True)
+
+# 2. AUTH CONFIG
+AUTH_REQUIRED = os.environ.get("MEMPALACE_AUTH_REQUIRED", "false").lower() == "true"
+REGISTRY_PATH = NEIGHBORHOOD_ROOT / "registry.json"
+
+class Registry:
+    """Manages neighborhood to API key mappings."""
+    
+    def __init__(self, path: Path):
+        self.path = path
+        self.data = self._load()
+
+    def _load(self):
+        if self.path.exists():
+            try:
+                with open(self.path, "r") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def _save(self):
+        with open(self.path, "w") as f:
+            json.dump(self.data, f, indent=2)
+
+    def add_neighborhood(self, n_id: str, api_key: Optional[str] = None):
+        if not api_key:
+            api_key = f"sk-{secrets.token_urlsafe(24)}"
+        self.data[n_id] = api_key
+        self._save()
+        return api_key
+
+    def remove_neighborhood(self, n_id: str):
+        if n_id in self.data:
+            del self.data[n_id]
+            self._save()
+            return True
+        return False
+
+    def validate(self, n_id: str, api_key: str) -> bool:
+        return self.data.get(n_id) == api_key
+
+registry = Registry(REGISTRY_PATH)
+
+async def verify_api_key(
+    x_neighborhood_id: str = Header(..., alias="X-Neighborhood-ID"),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key")
+):
+    """Dependency to validate the API key for a neighborhood."""
+    if not AUTH_REQUIRED:
+        return True
+    
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="X-API-Key header is missing")
+    
+    if not registry.validate(x_neighborhood_id, x_api_key):
+        raise HTTPException(status_code=403, detail="Invalid API key for this neighborhood")
+    
+    return True
 
 class PalaceInstance:
     """A wrapper for a single isolated MemPalace instance (Tenant or Corporate)."""
@@ -170,7 +230,7 @@ class IngestRequest(BaseModel):
     topic: str = "general"
     facts: Optional[List[dict]] = None  # List of {subject, predicate, object}
 
-@app.get("/status")
+@app.get("/status", dependencies=[Depends(verify_api_key)])
 async def get_palace_status(
     x_tenant_id: str = Header(..., alias="X-Tenant-ID"),
     x_neighborhood_id: str = Header(..., alias="X-Neighborhood-ID")
@@ -191,7 +251,7 @@ async def get_palace_status(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/wings")
+@app.post("/wings", dependencies=[Depends(verify_api_key)])
 async def create_wing(
     request: WingRequest,
     x_tenant_id: str = Header(..., alias="X-Tenant-ID"),
@@ -208,7 +268,7 @@ async def create_wing(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/ingest/bulk")
+@app.post("/ingest/bulk", dependencies=[Depends(verify_api_key)])
 async def bulk_ingest(
     request: BulkIngestRequest,
     x_tenant_id: str = Header(..., alias="X-Tenant-ID"),
@@ -238,7 +298,7 @@ async def bulk_ingest(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/query")
+@app.post("/query", dependencies=[Depends(verify_api_key)])
 async def query_neighborhood(
     request: PromptRequest,
     x_tenant_id: str = Header(..., alias="X-Tenant-ID"),
@@ -290,7 +350,7 @@ async def query_neighborhood(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/ingest")
+@app.post("/ingest", dependencies=[Depends(verify_api_key)])
 async def ingest_conversation(
     request: IngestRequest,
     x_tenant_id: str = Header(..., alias="X-Tenant-ID"),
@@ -338,4 +398,34 @@ async def ingest_conversation(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="MemPalace Neighborhood Service")
+    parser.add_argument("--add-neighborhood", metavar="ID", help="Add a neighborhood and generate an API key")
+    parser.add_argument("--set-key", metavar="KEY", help="Use with --add-neighborhood to set a custom key")
+    parser.add_argument("--remove-neighborhood", metavar="ID", help="Remove a neighborhood from the registry")
+    parser.add_argument("--list-neighborhoods", action="store_true", help="List all neighborhoods and their keys")
+    parser.add_argument("--port", type=int, default=8000, help="Port to run the service on")
+    
+    args = parser.parse_args()
+    
+    if args.add_neighborhood:
+        key = registry.add_neighborhood(args.add_neighborhood, args.set_key)
+        print(f"\nSUCCESS: Added neighborhood '{args.add_neighborhood}'")
+        print(f"API KEY: {key}\n")
+    elif args.remove_neighborhood:
+        if registry.remove_neighborhood(args.remove_neighborhood):
+            print(f"\nSUCCESS: Removed neighborhood '{args.remove_neighborhood}'\n")
+        else:
+            print(f"\nERROR: Neighborhood '{args.remove_neighborhood}' not found\n")
+    elif args.list_neighborhoods:
+        print("\nNEIGHBORHOOD REGISTRY:")
+        print("-" * 50)
+        for n_id, key in registry.data.items():
+            print(f"{n_id.ljust(20)} : {key}")
+        print("-" * 50 + "\n")
+    else:
+        print(f"\nStarting MemPalace Neighborhood Service on port {args.port}...")
+        print(f"Root: {NEIGHBORHOOD_ROOT}")
+        print(f"Auth Required: {AUTH_REQUIRED}\n")
+        uvicorn.run(app, host="0.0.0.0", port=args.port)

@@ -10,8 +10,36 @@ The service uses HTTP headers to route requests to the correct "Palace" folder. 
 | :--- | :--- | :--- |
 | `X-Tenant-ID` | Unique ID for the user (usually email). | `alice@company.com` |
 | `X-Neighborhood-ID` | Unique ID for the organization/company. | `acme_corp` |
+| `X-API-Key` | API Key for the neighborhood (if enabled). | `sk-ABC123XYZ...` |
 
-## 2. Endpoints
+## 2. Authentication (Optional)
+
+Authentication is disabled by default. When enabled, every request must include a valid `X-API-Key` matching the `X-Neighborhood-ID`.
+
+### Enable Authentication
+Set the following environment variable before starting the service:
+```bash
+export MEMPALACE_AUTH_REQUIRED=true
+```
+
+### Manage Neighborhood Keys
+Use the service CLI to manage your neighborhood registry:
+
+```bash
+# Add a neighborhood and generate a key
+python neighborhood_service.py --add-neighborhood acme_corp
+
+# Add a neighborhood with a custom key
+python neighborhood_service.py --add-neighborhood acme_corp --set-key my-secret-key
+
+# List all neighborhoods and keys
+python neighborhood_service.py --list-neighborhoods
+
+# Remove a neighborhood
+python neighborhood_service.py --remove-neighborhood acme_corp
+```
+
+## 3. Endpoints
 
 ### `GET /status`
 Returns the wing/room breakdown and total drawer count for the user's Personal Palace.
