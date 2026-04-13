@@ -24,19 +24,60 @@ class PalaceInstance:
     
     def __init__(self, config_dir: Path):
         self.config_dir = config_dir
+        # Ensure the directory exists
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Force the palace path to be this directory for isolation
+        self.palace_path = str(config_dir)
+        self.kg_path = str(config_dir / "knowledge_graph.sqlite3")
+        
         self.config = MempalaceConfig(config_dir=str(config_dir))
         self.config.init()  
         
-        # Initialize core components
-        self.kg = KnowledgeGraph(db_path=self.config.kg_path)
-        self.chroma_client = chromadb.PersistentClient(path=self.config.palace_path)
+        # Initialize core components using the isolated paths
+        self.kg = KnowledgeGraph(db_path=self.kg_path)
+        self.chroma_client = chromadb.PersistentClient(path=self.palace_path)
         self.collection = self.chroma_client.get_or_create_collection(self.config.collection_name)
         
+    def get_status(self):
+        """Get the hierarchical wing -> room breakdown for this palace."""
+        count = self.collection.count()
+        taxonomy = {}
+        try:
+            all_meta = self.collection.get(include=["metadatas"], limit=10000)["metadatas"]
+            for m in all_meta:
+                w = m.get("wing", "unknown")
+                r = m.get("room", "unknown")
+                if w not in taxonomy:
+                    taxonomy[w] = {}
+                taxonomy[w][r] = taxonomy[w].get(r, 0) + 1
+        except Exception:
+            pass
+        return {
+            "total_drawers": count,
+            "taxonomy": taxonomy
+        }
+
+    def add_wing(self, wing: str):
+        """Explicitly initialize a wing by adding a placeholder drawer."""
+        drawer_id = f"init_{wing}_{datetime.now().strftime('%Y%m%d')}"
+        self.collection.upsert(
+            ids=[drawer_id],
+            documents=[f"Initial placeholder for wing: {wing}"],
+            metadatas=[{
+                "wing": wing,
+                "room": "general",
+                "type": "placeholder",
+                "filed_at": datetime.now().isoformat()
+            }]
+        )
+        return drawer_id
+
     def search(self, query: str, limit: int = 5):
         """Perform semantic search in this specific palace."""
         return search_memories(
             query,
-            palace_path=self.config.palace_path,
+            palace_path=self.palace_path,
             n_results=limit
         )
 
@@ -109,6 +150,18 @@ class PromptRequest(BaseModel):
     prompt: str
     limit: Optional[int] = 5
 
+class WingRequest(BaseModel):
+    wing: str
+
+class BulkItem(BaseModel):
+    title: str
+    content: str
+    room: Optional[str] = "general"
+
+class BulkIngestRequest(BaseModel):
+    wing: str
+    items: List[BulkItem]
+
 class IngestRequest(BaseModel):
     prompt: str
     response: str
@@ -116,6 +169,74 @@ class IngestRequest(BaseModel):
     agent_name: str = "Gemini"
     topic: str = "general"
     facts: Optional[List[dict]] = None  # List of {subject, predicate, object}
+
+@app.get("/status")
+async def get_palace_status(
+    x_tenant_id: str = Header(..., alias="X-Tenant-ID"),
+    x_neighborhood_id: str = Header(..., alias="X-Neighborhood-ID")
+):
+    """
+    Returns the wing/room breakdown for the user's personal palace.
+    """
+    try:
+        nb = get_neighborhood(x_neighborhood_id)
+        personal = nb.get_tenant(x_tenant_id)
+        status = personal.get_status()
+        return {
+            "status": "success",
+            "neighborhood": x_neighborhood_id,
+            "tenant": x_tenant_id,
+            "palace": status
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/wings")
+async def create_wing(
+    request: WingRequest,
+    x_tenant_id: str = Header(..., alias="X-Tenant-ID"),
+    x_neighborhood_id: str = Header(..., alias="X-Neighborhood-ID")
+):
+    """
+    Explicitly creates a new wing in the user's personal palace.
+    """
+    try:
+        nb = get_neighborhood(x_neighborhood_id)
+        personal = nb.get_tenant(x_tenant_id)
+        drawer_id = personal.add_wing(request.wing)
+        return {"status": "success", "wing": request.wing, "drawer_id": drawer_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ingest/bulk")
+async def bulk_ingest(
+    request: BulkIngestRequest,
+    x_tenant_id: str = Header(..., alias="X-Tenant-ID"),
+    x_neighborhood_id: str = Header(..., alias="X-Neighborhood-ID")
+):
+    """
+    Bulk ingest content into a specific wing.
+    Useful for 'Mining' via the API without filesystem access.
+    """
+    try:
+        nb = get_neighborhood(x_neighborhood_id)
+        personal = nb.get_tenant(x_tenant_id)
+        
+        drawer_ids = []
+        for item in request.items:
+            # We prefix the content with the title for better retrieval
+            full_content = f"TITLE: {item.title}\n\n{item.content}"
+            d_id = personal.add_drawer(wing=request.wing, room=item.room, content=full_content)
+            drawer_ids.append(d_id)
+            
+        return {
+            "status": "success", 
+            "wing": request.wing, 
+            "items_added": len(drawer_ids),
+            "drawer_ids": drawer_ids
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/query")
 async def query_neighborhood(

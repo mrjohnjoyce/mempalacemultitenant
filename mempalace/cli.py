@@ -66,6 +66,12 @@ def main():
     parser = argparse.ArgumentParser(description="MemPalace Multi-Tenant CLI")
     parser.add_argument("--palace", help="Path to the palace directory")
     
+    # Use global args early to set environment variables
+    # This must be done BEFORE any other imports that use MempalaceConfig
+    args_global, _ = parser.parse_known_args()
+    if args_global.palace:
+        os.environ["MEMPALACE_PALACE_PATH"] = os.path.abspath(os.path.expanduser(args_global.palace))
+
     sub = parser.add_subparsers(dest="command")
     
     p_init = sub.add_parser("init")
